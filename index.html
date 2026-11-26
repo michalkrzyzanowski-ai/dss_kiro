@@ -36,8 +36,9 @@
     </div>
     <div id="help">
       <div><kbd>&uarr;</kbd> <kbd>&darr;</kbd> <kbd>&larr;</kbd> <kbd>&rarr;</kbd> Drive. Release to stop.</div>
+      <div><kbd>E</kbd> Board your passenger (stop inside the cab stop ring).</div>
       <div><kbd>R</kbd> Restore the cab, batteries and portal.</div>
-      <div>Collect all three batteries, then enter the portal.</div>
+      <div>Collect all three batteries, pick up the passenger, then deliver them to the portal.</div>
     </div>
     <button id="restore">Restore (R)</button>
   </div>
@@ -77,10 +78,15 @@
   ];
   const PORTAL = { x: sx(4), y: sy(0), r: 34 };    // top-right corner
 
+  // Pickup zone: on the street intersection of vertical street 3 and horizontal street 2.
+  const CAB_STOP = { x: sx(3), y: sy(2), r: 40 };
+
   const SPEED = 210;
   const HALF = 13;
 
-  let cab, batteries, won, hint, hintTimer, time = 0;
+  let cab, batteries, hint, hintTimer, time = 0;
+  let missionState;   // 'collecting' | 'waiting' | 'aboard' | 'won'
+  let passenger;      // { at: 'stop' | 'seat' | null }
   let trail = [], skid = 0;
   const TRAIL_LIFE = 1;      // seconds before a tyre mark disappears
   const SKID_TIME = 0.35;    // seconds of marks after each change of direction
@@ -89,7 +95,8 @@
     trail = []; skid = 0;
     cab = { x: START.x, y: START.y, angle: -Math.PI / 2 };
     batteries = BATTERY_POS.map(p => ({ x: p.x, y: p.y, taken: false }));
-    won = false;
+    missionState = 'collecting';
+    passenger = { at: null };
     hint = '';
     hintTimer = 0;
   }
@@ -97,6 +104,38 @@
 
   const count = () => batteries.filter(b => b.taken).length;
   const powered = () => count() === 3;
+  const isWon = () => missionState === 'won';
+
+  // Pure board transition: only waiting + stopped + in zone moves the passenger into the seat.
+  function tryBoard(state, input) {
+    if (state.missionState === 'waiting' && state.passengerAt === 'stop' &&
+        !input.anyArrowHeld && input.inZone) {
+      return { missionState: 'aboard', passengerAt: 'seat' };
+    }
+    return state;
+  }
+  const isStopped = () => !(keys.up || keys.down || keys.left || keys.right);
+  const inPickupZone = () => Math.hypot(cab.x - CAB_STOP.x, cab.y - CAB_STOP.y) < CAB_STOP.r;
+
+  function handleBoardKey() {
+    if (isWon()) return;
+    const before = { missionState, passengerAt: passenger.at };
+    const after = tryBoard(before, { anyArrowHeld: !isStopped(), inZone: inPickupZone() });
+    if (after !== before) {
+      missionState = after.missionState;
+      passenger.at = after.passengerAt;
+      hint = 'Passenger aboard. Drive to the portal.'; hintTimer = 4;
+    }
+  }
+
+  function onThirdBattery() {
+    missionState = 'waiting';
+    passenger = { at: 'stop' };
+    hint = 'The portal is powered! Drive to the cab stop and press E.'; hintTimer = 4;
+  }
+
+  // Single entry point for the win transition.
+  function enterWon() { missionState = 'won'; }
 
   // Input
   const keys = { up: false, down: false, left: false, right: false };
@@ -104,6 +143,7 @@
   window.addEventListener('keydown', e => {
     if (e.key in keyMap) { keys[keyMap[e.key]] = true; e.preventDefault(); }
     else if (e.key === 'r' || e.key === 'R') reset();
+    else if (e.key === 'e' || e.key === 'E') handleBoardKey();
   });
   window.addEventListener('keyup', e => {
     if (e.key in keyMap) { keys[keyMap[e.key]] = false; e.preventDefault(); }
@@ -136,7 +176,7 @@
     for (const m of trail) m.age += dt;
     trail = trail.filter(m => m.age < TRAIL_LIFE);
     if (skid > 0) skid -= dt;
-    if (won) return;
+    if (isWon()) return;
 
     let dx = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
     let dy = (keys.down ? 1 : 0) - (keys.up ? 1 : 0);
@@ -162,14 +202,16 @@
     for (const b of batteries) {
       if (!b.taken && Math.hypot(cab.x - b.x, cab.y - b.y) < 28) {
         b.taken = true;
-        if (powered()) { hint = 'The portal is powered! Drive into it.'; hintTimer = 4; }
+        if (powered()) onThirdBattery();
         else { hint = `Battery ${count()} of 3 collected.`; hintTimer = 2; }
       }
     }
 
     if (Math.hypot(cab.x - PORTAL.x, cab.y - PORTAL.y) < PORTAL.r) {
-      if (powered()) won = true;
-      else { hint = 'The portal is dark. Find all three batteries.'; hintTimer = 2; }
+      if (powered()) {
+        if (passenger.at === 'seat') enterWon();
+        else { hint = 'Pick up your passenger'; hintTimer = 2; }
+      } else { hint = 'The portal is dark. Find all three batteries.'; hintTimer = 2; }
     }
   }
 
@@ -233,6 +275,38 @@
     ctx.restore();
   }
 
+  function drawGhost(x, y, scale) {
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(scale, scale);
+    ctx.shadowColor = '#7dff6b'; ctx.shadowBlur = 12;
+    ctx.fillStyle = '#e8ffe4';
+    ctx.beginPath();
+    ctx.arc(0, -4, 8, Math.PI, 0);
+    ctx.lineTo(8, 9); ctx.lineTo(4, 5); ctx.lineTo(0, 9); ctx.lineTo(-4, 5); ctx.lineTo(-8, 9);
+    ctx.closePath(); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#150c2b';
+    ctx.fillRect(-4, -5, 2.5, 3); ctx.fillRect(1.5, -5, 2.5, 3);
+    ctx.restore();
+  }
+
+  function drawCabStop() {
+    if (missionState === 'collecting') return;
+    ctx.save();
+    ctx.shadowColor = '#7dff6b'; ctx.shadowBlur = 14;
+    ctx.strokeStyle = '#7dff6b'; ctx.lineWidth = 3;
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath(); ctx.arc(CAB_STOP.x, CAB_STOP.y, CAB_STOP.r, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    if (passenger.at === 'stop') {
+      drawGhost(CAB_STOP.x, CAB_STOP.y + Math.sin(time * 3) * 3, 1.6);
+      ctx.font = 'bold 14px system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#7dff6b';
+      ctx.fillText('CAB STOP', CAB_STOP.x, CAB_STOP.y - CAB_STOP.r - 10);
+    }
+  }
+
   function drawBatteries() {
     for (const b of batteries) {
       if (b.taken) continue;
@@ -280,6 +354,9 @@
     ctx.fillRect(15, -8, 3, 5); ctx.fillRect(15, 3, 3, 5);   // headlights
     ctx.fillStyle = '#fff';
     ctx.fillRect(-12, -3, 6, 6);            // taxi sign
+    if (passenger.at === 'seat') {
+      ctx.save(); ctx.rotate(-cab.angle); drawGhost(0, 0, 0.9); ctx.restore();
+    }
     ctx.restore();
   }
 
@@ -302,7 +379,7 @@
     ctx.fillStyle = '#d9c8ff';
     ctx.textAlign = 'right';
     ctx.fillText(powered() ? 'Portal: POWERED' : 'Portal: dark', W - 14, 22);
-    if (hintTimer > 0 && !won) {
+    if (hintTimer > 0 && !isWon()) {
       ctx.textAlign = 'center';
       ctx.fillStyle = '#ffffff';
       ctx.fillText(hint, W / 2, 22);
@@ -331,11 +408,12 @@
     update(dt);
     drawTown();
     drawPortal();
+    drawCabStop();
     drawBatteries();
     drawTrail();
     drawCab();
     drawHUD();
-    if (won) drawWin();
+    if (isWon()) drawWin();
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
